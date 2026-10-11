@@ -1,0 +1,92 @@
+# Optimizer smoke — compare two Bedrock models on your own eval set
+#
+# The optimizer runs the cross-product (dataset x model x mode), generates a
+# response for each row, scores it with LLM judges, and writes results.parquet
+# plus a summary.md ranking candidates by quality and cost.
+#
+# This config uses only OSS building blocks: the generic `parquet` dataset, the
+# built-in `single_v1` prompt set, Bedrock for both generation and judging, and
+# the `single_call` mode. No `secrets:` block — Bedrock authenticates with the
+# SageMaker execution role.
+#
+#   rl-train validate-optimizer --config examples/smoke_tests/optimizer_smoke.yaml
+#   rl-train optimizer          --config examples/smoke_tests/optimizer_smoke.yaml
+#
+# Before running:
+#   1. Replace every `your-bucket`.
+#   2. Upload a parquet with at least a question column and a reference-answer
+#      column, and set `input_columns` / `reference_column` to match.
+#   3. Confirm the execution role can call `bedrock:InvokeModel` on both the
+#      candidate models and the judge model. `validate-optimizer` never touches
+#      the network, so it cannot check this for you.
+
+version: 1
+
+job:
+  name: optimizer-smoke
+
+optimizer:
+  # Keeps the smoke run to a handful of rows and makes it reproducible. Raise
+  # `size` to evaluate more of the file.
+  sample:
+    size: 5
+    seed: 13
+
+  datasets:
+    - name: parquet
+      path: "s3://your-bucket/eval/questions.parquet"
+      # Maps your column names onto the placeholders the prompt set uses.
+      # `single_v1` takes exactly one variable, `input`.
+      input_columns:
+        input: question
+      reference_column: answer
+
+  # Built-in pass-through prompt set, packaged inside foresightrlcore so it
+  # travels into the job. A prompt set whose YAML lives outside the package
+  # needs `prompts_path` pointing at S3 as well.
+  prompt_set: single_v1
+
+  # The candidates being compared. Add or remove entries freely; the runner
+  # evaluates every (dataset x model x mode) combination.
+  models:
+    - name: "anthropic.claude-3-haiku-20240307-v1:0"
+      provider: bedrock
+      region: us-west-2
+    - name: "anthropic.claude-3-5-sonnet-20240620-v1:0"
+      provider: bedrock
+      region: us-west-2
+
+  modes: [single_call]
+
+  judges:
+    - name: correctness
+      weight: 1
+      client: default
+    - name: hallucination
+      weight: 1
+      client: default
+
+  judge_clients:
+    default:
+      provider: bedrock
+      bedrock:
+        model_id: "anthropic.claude-3-5-sonnet-20240620-v1:0"
+        region: us-west-2
+
+execution:
+  type: aws_training_job
+
+output:
+  s3_path: "s3://your-bucket/output/optimizer-smoke/"
+
+container:
+  recipe: qwen3_5
+
+# Sizing is automatic: API-only candidates like these get a CPU instance. Add a
+# `provider: local` candidate and the launcher switches to GPU so it can run
+# `vllm serve` in-job.
+#
+# Results are checkpointed to JSONL as rows complete, so a re-run resumes rather
+# than repeating work. If you change the config and want a clean run, clear the
+# checkpoint under output.s3_path first — otherwise the job finds every row
+# already complete and exits having done nothing.

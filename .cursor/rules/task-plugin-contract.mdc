@@ -1,0 +1,87 @@
+---
+description: Task plugin contract - how to create reward functions, callbacks, and dataset loaders for training tasks
+globs: foresightrlcore/tasks/**/*.py
+alwaysApply: false
+---
+
+# Task Plugin Contract
+
+## Overview
+
+Tasks are pluggable **packages** under `foresightrlcore/tasks/<name>/` that provide domain-specific reward logic, callbacks, dataset loading, an optional serverless Lambda, and an optional JSONL converter. The training driver dynamically imports them based on `task.type` in the YAML config.
+
+Per-task folder layout:
+
+| File                | Role                                                          |
+|---------------------|---------------------------------------------------------------|
+| `trainer.py`        | TRL reward, dataset loader, callbacks (training-stack deps)   |
+| `judge_logic.py`    | Stdlib-only shared logic (prompts, scoring math)              |
+| `lambda_reward.py`  | AWS Lambda handler for SageMaker Serverless RLVR (optional)   |
+| `convert.py`        | Record-level JSONL mapper (optional, registered with serverless registry) |
+| `__init__.py`       | Re-exports protocol functions + registers lambda/converter/dataset |
+
+For the serverless-side contract (registry, bundler, helpers) see [`serverless-reward-contract.mdc`](serverless-reward-contract.mdc) and [`docs/serverless-reward-functions.md`](../../docs/serverless-reward-functions.md).
+
+## Required Exports
+
+Every task package's `__init__.py` must re-export three functions from its `trainer.py`:
+
+```python
+def get_reward_function(task_config: dict) -> Callable:
+    """Return a reward function compatible with TRL's GRPOTrainer.
+    
+    The returned callable receives:
+      - completions: list[list[dict]] — batch of model completions
+      - <column_name>: list[...] — dataset columns as keyword args
+    Returns: list[float] — one reward per completion.
+    """
+
+def get_callbacks(task_config: dict) -> list:
+    """Return a list of transformers.TrainerCallback instances.
+    Return [] if no callbacks are needed.
+    """
+
+def get_dataset_loader(task_config: dict, model_name: str) -> Callable:
+    """Return a callable that takes a directory path and returns a datasets.Dataset.
+    The dataset must have a 'prompt' column (list of message dicts).
+    Additional columns become keyword args to the reward function.
+    """
+```
+
+## Registering a Task
+
+1. Create `foresightrlcore/tasks/<name>/` with `trainer.py` (defining the three exports above), `judge_logic.py` (if shared with a serverless Lambda), and `__init__.py` re-exporting from `trainer`.
+2. If a serverless reward Lambda is needed, add `lambda_reward.py` + `convert.py`, and call `registry.register_lambda(...)` + `registry.register_converter(...)` in `__init__.py` **before** the trainer re-export (so the serverless CLI works without the training stack installed).
+3. Reference it in config: `task.type: <name>`.
+4. The task loader will import it via `foresightrlcore.tasks.load_task_module()` — folders import correctly because Python treats `tasks/<name>/` as a regular package.
+
+## Reward Mode Pattern
+
+Tasks can support multiple reward strategies via `task_config["reward_mode"]`:
+
+```python
+def get_reward_function(task_config: dict) -> Callable:
+    mode = task_config.get("reward_mode", "default_mode")
+    if mode == "mock":
+        return _build_mock_reward(...)
+    elif mode == "llm_judge":
+        return _build_llm_judge_reward(...)
+    else:
+        raise ValueError(f"Unknown reward_mode: {mode}")
+```
+
+## Current Tasks
+
+- **`advice`**: Business advice quality via LLM critic. Supports `reward_mode: llm_judge | mock`. Includes thinking-length penalties for Qwen3 models.
+- **`email_outcome`**: E-commerce email-campaign outcome prediction (7 categories: purchased, added_to_cart, browsed_after, clicked, opened, ignored, unsubscribed). Supports `reward_mode: rule_based | mock`. The `rule_based` reward uses a rarity-weighted accuracy score (rare categories like `purchased` get higher reward when predicted correctly) combined with a structural-validity check on the JSON output (predicted_category enum + confidence in `[0, 1]`). No LLM judge — fully deterministic, cheap to evaluate, suitable for cold-start training before an LLM-judge variant is wired up.
+
+## Training Hooks (separate from task callbacks)
+
+In addition to task callbacks returned by `get_callbacks()`, users can add extra callbacks, pre/post hooks, and custom trainer classes via `training.hooks` in the YAML config. Hook callbacks are appended **after** task callbacks.
+
+See `docs/tasks/training-hooks.md` for full documentation.
+
+## Testing
+
+- Test reward functions locally with synthetic inputs (no GPU needed).
+- Use `reward_mode: mock` in integration tests.

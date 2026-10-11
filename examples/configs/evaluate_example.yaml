@@ -1,0 +1,175 @@
+# Evaluate template — run benchmarks against candidate models
+#
+# Runs the cross-product (benchmark x model): each benchmark is executed
+# against each candidate through an OpenAI-compatible endpoint the operation
+# stands up, and the scores land in results.parquet + benchmark_scores.csv +
+# summary.md.
+#
+#   rl-train list-benchmarks
+#   rl-train validate-evaluate --config examples/configs/evaluate_example.yaml
+#   rl-train evaluate          --config examples/configs/evaluate_example.yaml
+#
+# Smaller starting point: examples/smoke_tests/evaluate_smoke.yaml.
+# Full guide: docs/launching-evaluate.md.
+
+version: 1
+
+job:
+  name: evaluate-example
+
+evaluate:
+  benchmarks:
+    # 1. A catalog benchmark. `rl-train list-benchmarks` prints what is
+    #    available, including anything an installed extension contributed.
+    #    Naming one is enough; everything else comes from the catalog.
+    - name: demo_mcq
+
+    # 2. The same catalog benchmark with one field overridden. Only the fields
+    #    you set here override the catalog entry.
+    - name: demo_mcq_quick
+      # Entries not in the catalog must define their own `type`.
+      type: mcq
+      display_name: Demo MCQ (100 rows)
+      metrics: [choice_match]
+      dataset:
+        loader: csv
+        path: "s3://your-bucket/benchmarks/mcq.csv"
+        limit: 100
+
+    # 3. A benchmark defined inline against your own data, scored by an LLM
+    #    judge rather than an exact answer key.
+    - name: freeform_qa
+      type: generative
+      metrics: [llm_judge]
+      dataset:
+        loader: jsonl
+        # Named splits: `split` picks one, so switching dev -> test is one line.
+        splits:
+          dev: "s3://your-bucket/benchmarks/qa/dev.jsonl"
+          test: "s3://your-bucket/benchmarks/qa/test.jsonl"
+        split: dev
+
+    # 4. A benchmark that lives in its own repository and drives its own loop.
+    #    We stage the source, hand it an endpoint, and read back its score —
+    #    the benchmark never learns which provider is behind the endpoint.
+    - name: external_suite
+      type: external_process
+      source:
+        git: "https://github.com/your-org/your-benchmark"
+        # Always pin: an unpinned branch makes results irreproducible.
+        ref: v1.4.0
+      # A dedicated interpreter keeps the benchmark's pins off ours.
+      isolate: venv
+      requirements: ["-r requirements.txt"]
+      command:
+        - python
+        - -m
+        - your_benchmark
+        - --endpoint=$OPENAI_BASE_URL
+        - --model=$EVALUATE_MODEL_ID
+        - --out=$EVALUATE_OUTPUT_FILE
+      # Alias the contract variables onto whatever the benchmark already reads.
+      env:
+        YOUR_BENCH_API_BASE: "$OPENAI_BASE_URL"
+      timeout_seconds: 5400
+      # Stochastic suites need more than one sample to be measured at all.
+      trials: 3
+      # Restrict an expensive benchmark to a subset of the candidates.
+      models: [frontier]
+
+  models:
+    # API candidates: no GPU. Prices are USD per 1K tokens and feed the cost
+    # column in the report.
+    - name: claude-sonnet
+      provider: bedrock
+      model_id: "anthropic.claude-sonnet-4-20250514-v1:0"
+      region: us-west-2
+      price_in: 0.003
+      price_out: 0.015
+
+    # A self-hosted candidate. One of these switches the whole run to a GPU
+    # instance, because the endpoint becomes a real `vllm serve`.
+    # - name: "s3://your-bucket/models/Qwen3-8B/"
+    #   provider: local
+    #   serving:
+    #     tensor_parallel_size: 4
+    #     max_model_len: 16384
+
+    # Offline candidate: synthetic replies, no credentials. Use it to prove the
+    # plumbing works before spending on a real run — the scores mean nothing.
+    # - name: echo-model
+    #   provider: echo
+
+  # Named groups so a benchmark can say `models: [frontier]` instead of
+  # repeating every name.
+  model_groups:
+    frontier: [claude-sonnet]
+
+  # Run every (benchmark, model) pair this many times. >1 reports a mean with a
+  # Student's-t interval, which is the only honest way to read a stochastic
+  # benchmark. Per-benchmark `trials` overrides this.
+  trials: 1
+  confidence:
+    level: 0.95
+    # Spend extra trials only on benchmarks whose sub-scores disagreed.
+    retrial_flaky: false
+    max_retrials: 2
+
+  concurrency: 8
+
+  retry:
+    max_retries: 6
+    base_delay: 2.0
+
+  checkpoint:
+    enabled: true
+    every_n_rows: 20
+
+  # Reporters run in addition to the files written to output.s3_path. An entry
+  # is a bare name, or a mapping when the sink needs an address to publish to.
+  reporters:
+    - table
+    - json
+    # Publish to internal experiment tracking (needs foresightrl-intuit, and
+    # the aleta package in the container -- see docs/launching-evaluate.md).
+    # - type: aleta
+    #   params:
+    #     identifier: "<aleta-asset-id>"
+    #     env: PRD
+    #     experiment: llm-leaderboard
+
+  # Required when any benchmark uses a judge metric.
+  judge_clients:
+    default:
+      provider: bedrock
+      bedrock:
+        model_id: "anthropic.claude-sonnet-4-20250514-v1:0"
+        region: us-west-2
+
+  # SageMaker sizing. Leave instance_type unset to let it resolve from the
+  # candidates: CPU for API-only, GPU when anything serves locally.
+  # instance_type: ml.m5.2xlarge
+  instance_count: 1
+  volume_size_gb: 200
+
+  # Needed to reach an internal network (private git remote, internal PyPI).
+  # vpc:
+  #   subnets: ["subnet-xxxx"]
+  #   security_groups: ["sg-xxxx"]
+
+execution:
+  type: aws_training_job   # or: local
+
+output:
+  s3_path: "s3://your-bucket/evaluate/example/"
+  # Survives a spot interruption: completed trials are not re-run on restart.
+  checkpoint_s3_path: "s3://your-bucket/evaluate/example/checkpoints/"
+
+container:
+  # Resolves the image and the evaluate dependency set together.
+  recipe: qwen3_5
+  # An Intuit-only benchmark, reporter, or provider needs the extension staged:
+  # extra_packages: ["foresightrl_intuit"]
+
+environment:
+  AWS_DEFAULT_REGION: us-west-2

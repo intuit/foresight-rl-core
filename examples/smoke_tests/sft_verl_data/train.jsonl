@@ -1,0 +1,8 @@
+{"messages": [{"role": "user", "content": "What is the capital of France?"}, {"role": "assistant", "content": "The capital of France is Paris."}]}
+{"messages": [{"role": "user", "content": "What is 2 + 2?"}, {"role": "assistant", "content": "2 + 2 equals 4."}]}
+{"messages": [{"role": "user", "content": "Name a primary color."}, {"role": "assistant", "content": "Red is a primary color."}]}
+{"messages": [{"role": "user", "content": "What is the opposite of hot?"}, {"role": "assistant", "content": "The opposite of hot is cold."}]}
+{"messages": [{"role": "user", "content": "How many days are in a week?"}, {"role": "assistant", "content": "There are seven days in a week."}]}
+{"messages": [{"role": "user", "content": "What is the boiling point of water in Celsius?"}, {"role": "assistant", "content": "Water boils at 100 degrees Celsius."}]}
+{"messages": [{"role": "user", "content": "Name a planet in our solar system."}, {"role": "assistant", "content": "Earth is a planet in our solar system."}]}
+{"messages": [{"role": "user", "content": "What is the plural of 'mouse'?"}, {"role": "assistant", "content": "The plural of 'mouse' is 'mice'."}]}

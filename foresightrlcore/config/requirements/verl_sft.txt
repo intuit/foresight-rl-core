@@ -1,0 +1,59 @@
+# Container requirements for verl_sft recipe (torchrun / vllm_mode: none).
+# Used by: SageMaker launcher (via recipes.py) and intuit/docker/Dockerfile.verl_sft-torchrun.
+# To add a new package: edit this file. No code changes needed.
+#
+# This recipe is model-agnostic (verl's FSDP SFT stack is the same
+# regardless of which model.profile a config uses) — Gemma-4-specific
+# facts belong in model.profile: gemma4_moe, not here.
+#
+# Plain verl==0.9.1, not the verl[fsdp] extra — that extra hard-pins
+# torch==2.11.0, for which flash-attn==2.8.3 has no published prebuilt
+# wheels at all. The base verl package has no torch dependency (confirmed
+# via PyPI metadata), so torch==2.9.0 is pinned explicitly here instead, to
+# match what this recipe's DLC base image already ships (no in-container
+# torch upgrade).
+#
+# flash-attn is deliberately NOT listed here — the DLC base image ships a
+# pre-installed flash-attn that pip's batch resolver silently keeps even
+# when this file pins a different `flash-attn @ <url>` (another
+# already-satisfied package, transformer_engine, references the existing
+# install, so pip downloads the correct wheel to read its metadata but
+# omits it from the final "Installing collected packages" step — a
+# resolver quirk that can't be influenced from inside a requirements.txt
+# file). Instead, foresightrlcore.methods.sft_verl._ensure_flash_attn_compatible()
+# runs an isolated `pip uninstall` + `--force-reinstall` in Python we
+# control completely, once per node, before verl's flash-attn-triggering
+# import chain executes. The wheel URL comes from
+# foresightrlcore.config.recipes.resolve_flash_attn_wheel(), resolved per
+# GPU family (GPU_FAMILIES/FLASH_ATTN_WHEELS) — update the wheel there if
+# you change the target build.
+#
+# transformers pinned <5.11 per verl's own base constraint (setup.py) — a
+# sink-less-model regression in 5.6.0 that wasn't fixed until 5.6.1, with
+# the upper bound kept for safety. 5.10.4 resolves here, verified against
+# the real Gemma 4 checkpoint/tokenizer/chat-template.
+#
+# verl==0.9.1 must be pinned explicitly: an unconstrained `pip install
+# verl` can silently resolve to an older version if the interpreter has no
+# prebuilt wheels for 0.9.1's dependency chain.
+#
+# Deliberately excludes vllm/ray: not needed for SFT (verl's SFT trainer is
+# a plain torchrun job; ray[default] comes in transitively via verl's own
+# base deps regardless, but is unused for pure FSDP/SFT/torchrun).
+torch==2.9.0
+verl==0.9.1
+# liger-kernel>=0.8.2 matches verl's own GPU_REQUIRES floor (setup.py) —
+# enables model.use_liger (VerlSftMethodHandler wires
+# training.sft_verl.use_liger, default True, straight to it). Verified
+# against liger-kernel 0.8.3's real model-type registry: it already has
+# native "gemma4"/"gemma4_text" support (fused RMSNorm + GeGLU MLP; MoE
+# expert kernels are explicitly out of liger's own scope for Gemma 4, so
+# this cannot touch the target_parameters LoRA path). No hard transformers
+# pin from liger itself (confirmed via PyPI metadata), so this doesn't
+# reopen the transformers<5.11 constraint above.
+liger-kernel>=0.8.2
+boto3>=1.34
+pydantic>=2.0.0
+tensorboard
+pyyaml
+huggingface_hub[hf_transfer]

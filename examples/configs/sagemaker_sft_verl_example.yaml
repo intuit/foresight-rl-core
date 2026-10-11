@@ -1,0 +1,152 @@
+# verl LoRA SFT — Gemma 4 26B-A4B (MoE) on 2x p4de.24xlarge (16x A100 80GB)
+#
+# Method: sft_verl — verl's FSDP SFT trainer (verl.trainer.sft_trainer), a
+# plain torchrun job (no Ray, no vLLM). Unlike GRPO/TRL methods, sft_verl
+# needs no `task:`/`secrets:` section at all — it has no reward function
+# or LLM judge, so those config sections are simply unused here.
+#
+#   rl-train validate --config examples/configs/sagemaker_sft_verl_example.yaml
+#   rl-train train    --config examples/configs/sagemaker_sft_verl_example.yaml
+#
+# See docs/launching-sft-verl.md for the full guide, including the
+# offline packing step this config assumes, and the simpler
+# data_format: messages alternative (no offline step, tokenizes live at
+# train time) if you don't need packed-sequence efficiency yet.
+#
+# Data must be pre-packed offline first:
+#   rl-train tokenize-pack --input <jsonl-dir> --tokenizer <hf-model-or-s3-path> \
+#     --output <local-out-dir> --pack-size 18432 --data-format messages \
+#     --eval-split-size 0.02
+#   # then upload <local-out-dir>'s contents to data.train_path/eval_path below.
+#   # --eval-split-size is what produces validation_*.idx.parquet — without
+#   # it (or with data.eval_path removed below to match), sft_verl's packed
+#   # loader globs for validation_*.idx.parquet and hard-fails at job start.
+#
+# Replace every `your-bucket` placeholder before launching; this is a
+# large, expensive multi-node job.
+
+job:
+  name: gemma4-26ba4b-sft-verl
+  max_runtime_hours: 48
+
+method:
+  type: sft_verl
+
+execution:
+  type: aws_training_job
+
+infra:
+  # torchrun-only path: the launcher auto-selects entry_point=train.py +
+  # SageMaker's SDK-native Torchrun(process_count_per_node=8) distribution
+  # when vllm_mode is "none" — no vLLM server, no topology field needed.
+  vllm_mode: none
+  instance_type: ml.p4de.24xlarge   # 8x A100 80GB, EFA, per node
+  instance_count: 2                 # 16 GPUs total
+  # Uncomment and point at your own account's key if the destination
+  # bucket's default encryption key isn't one your training role can use
+  # (an explicit deny in an IAM permission boundary silently overrides any
+  # allow elsewhere — SageMaker checkpoint-sync uploads fail with
+  # kms:GenerateDataKey AccessDenied only after the cluster is already
+  # billed). Also covers checkpoint artifact uploads — SageMaker has no
+  # separate CheckpointConfig KMS field, they inherit this same key.
+  # kms_key_id: alias/your-kms-key-alias
+
+model:
+  # >=10B model — pre-stage to S3 to avoid the multi-rank HF Hub download
+  # race (see CLAUDE.md "Pre-Staged Models"); s3://.../ must end in "/".
+  name: "s3://your-bucket/models/gemma-4-26B-A4B-it/"
+  enable_thinking: true
+  # Resolves target_modules/exclude_modules/target_parameters (below),
+  # thinking_kwarg/trust_remote_code, and attn_implementation from
+  # foresightrlcore/config/model_profiles.py's "gemma4_moe" entry, verified
+  # directly against the real checkpoint: attention q/k/v/o_proj are plain
+  # nn.Linear ("all-linear" auto-detect reaches them); the per-layer router
+  # gate (router.proj) is also a plain nn.Linear and is excluded to avoid
+  # perturbing routing; the 128 experts are fused 3D nn.Parameter tensors
+  # (experts.gate_up_proj/down_proj) that target_modules matching cannot
+  # reach at all — target_parameters is required to adapt them.
+  #
+  # attn_implementation resolves to "sdpa": Gemma 4's 5 "full_attention"
+  # layers use global_head_dim=512, which exceeds FlashAttention's
+  # universal head_dim<=256 cap (confirmed against the real config.json
+  # and flash-attn's own README — not architecture- or version-specific,
+  # no pin fixes this). That's why use_remove_padding is false below —
+  # verl's own packing depends entirely on flash-attn's cu_seqlens kernel,
+  # which sdpa doesn't have. (This same pairing is now also defaulted
+  # automatically whenever attn_implementation isn't flash_attention_2 —
+  # set explicitly here anyway, for clarity.)
+  #
+  # To swap in a different model: add a new entry to MODEL_PROFILES after
+  # running the same inspection pass (see that module's docstring), then
+  # change only this line and model.name below — no code changes needed
+  # (this is what container.recipe: verl_sft is model-agnostic for). Any
+  # field you set explicitly under model.lora / model.thinking_kwarg /
+  # model.trust_remote_code overrides the profile's value for that field
+  # only (see resolve_model_profile()).
+  profile: gemma4_moe
+  lora:
+    r: 64
+    alpha: 128
+    # Must be 0.0 for gemma4_moe (and any other profile that uses
+    # target_parameters): PEFT's ParamWrapper, dispatched for every
+    # target_parameters entry (here, gemma4_moe's fused MoE expert
+    # weights), unconditionally rejects nonzero lora_dropout —
+    # peft.LoraConfig.lora_dropout is one model-wide value, not settable
+    # per-target. `rl-train validate` catches this combination before a
+    # cluster is ever provisioned.
+    dropout: 0.0
+
+training:
+  epochs: 2
+  learning_rate: 1.0e-4
+  gradient_checkpointing: true
+  logging_steps: 10
+  save_steps: 200
+  report_to: tensorboard
+
+  sft_verl:
+    data_format: packed   # pre-tokenized, pre-packed Parquet — no in-job tokenization
+    max_length: 18432      # must be >= the --pack-size used by rl-train tokenize-pack
+    truncation: error      # fail loud on outliers rather than silently truncate the response
+    use_dynamic_bsz: true
+    max_token_len_per_gpu: 18432
+    # ulysses_sequence_parallel_size is not usable here: it requires
+    # use_remove_padding=true, which in turn requires flash_attention_2 —
+    # unavailable for this model (see attn_implementation note above). If
+    # 18K-token packed sequences don't fit in memory at ulysses_sp=1,
+    # reduce --pack-size in the offline packing step instead.
+    use_remove_padding: false
+    save_lora_only: true   # ~54 GiB -> a few GiB per checkpoint; auto-merged back in on resume
+    train_batch_size: 256
+    save_freq: 200
+    resume_mode: auto
+    # Low, not verl's own default of 8: data.eval_path below means a
+    # val_dataloader gets built too, sharing this SAME worker count
+    # (verl's own data.num_workers field backs both train and val). Every
+    # GPU-local-rank process forks this many workers independently — on a
+    # sizable model, a second round of forking here (for val, after the
+    # model/optimizer have already grown the process) can crash with
+    # `OSError: [Errno 12] Cannot allocate memory`, reproduced directly on
+    # a real SageMaker job. Safe to remove if your model/instance combo
+    # doesn't hit this.
+    dataloader_num_workers: 2
+
+data:
+  # train_path/eval_path point at the SAME flat prefix on purpose —
+  # rl-train tokenize-pack writes training_<N>.idx.parquet and
+  # validation_<N>.idx.parquet side by side; sft_verl.py's filename_prefix
+  # disambiguation (training_ vs validation_) picks the right files out of
+  # the shared directory.
+  train_path: "s3://your-bucket/data/gemma4_sft_packed/"
+  eval_path: "s3://your-bucket/data/gemma4_sft_packed/"
+
+output:
+  s3_path: "s3://your-bucket/output/gemma4-26ba4b-sft-verl"
+  checkpoint_s3_path: "s3://your-bucket/checkpoints/gemma4-26ba4b-sft-verl"
+
+container:
+  recipe: verl_sft
+
+# No `secrets:` / `task:` sections — verl SFT has no reward function / LLM
+# judge / task plugin; those config sections are Optional and unused by
+# method.type: sft_verl.

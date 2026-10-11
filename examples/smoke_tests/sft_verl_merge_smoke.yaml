@@ -1,0 +1,76 @@
+# sft_verl merge smoke — Qwen3-0.6B, CPU-only, single instance.
+#
+# Exercises method.type: sft_verl's training.sft_verl.merge_lora_only path:
+# reconstruct the LoRA-only checkpoint's FSDP-sharded state dict, merge the
+# adapter into model.name's real pretrained base weights, save a plain
+# (non-PEFT) HF model. See VerlSftMethodHandler._run_merge_lora_only's
+# docstring for why this is a full merge rather than verl's own
+# model_merger CLI.
+#
+# merge_lora_only never touches the GPU/attention/FSDP-distributed path at
+# all — it's a single-process, CPU/RAM-bound reconstruct + merge (see
+# _validate_sft_verl's matching exemption from the GPU_FAMILIES instance-type
+# check) — so a plain CPU instance is correct here, not a cost-saving shortcut.
+#
+# This is a *follow-up* to a real sft_verl training run: it reads an existing
+# checkpoint from output.checkpoint_s3_path, it doesn't produce one. Run
+# sft_verl_train_smoke.yaml first (or point output.checkpoint_s3_path /
+# model.lora at any other sft_verl LoRA run's values) before this.
+#
+#   1. Replace every `your-bucket` below with wherever
+#      sft_verl_train_smoke.yaml (or your real training run) wrote its
+#      checkpoint.
+#   2. rl-train validate --config examples/smoke_tests/sft_verl_merge_smoke.yaml
+#      rl-train train    --config examples/smoke_tests/sft_verl_merge_smoke.yaml
+#
+# Expect well under a minute for a model this size, ending with a merged HF
+# model under output.s3_path.
+
+job:
+  name: sft-verl-merge-smoke
+  max_runtime_hours: 1
+
+method:
+  type: sft_verl
+
+execution:
+  type: aws_training_job
+
+infra:
+  vllm_mode: none
+  # Any non-GPU instance works — merge_lora_only is exempt from the
+  # GPU_FAMILIES check entirely (see _validate_sft_verl). Sized for a 0.6B
+  # model's full fp32 state dict comfortably fitting in RAM with margin.
+  instance_type: ml.m5.4xlarge
+  instance_count: 1
+
+model:
+  # Must match the model.name AND model.lora.r/alpha of the SFT run that
+  # produced the checkpoint below exactly — save_lora_only never saves the
+  # frozen base weights, so the base model is re-downloaded fresh here and
+  # the adapter shapes must match what's actually in the checkpoint.
+  # (Matches sft_verl_train_smoke.yaml's model: block.)
+  name: Qwen/Qwen3-0.6B
+  lora:
+    r: 8
+    alpha: 16
+
+training:
+  sft_verl:
+    merge_lora_only: true
+    # None (the default) auto-detects the highest global_step_N present —
+    # set explicitly only if you want an earlier checkpoint instead.
+    # merge_checkpoint_step: 3
+
+output:
+  s3_path: "s3://your-bucket/output/sft-verl-merge-smoke"
+  # The checkpoint TO merge (an existing sft_verl LoRA run's output) —
+  # e.g. sft_verl_train_smoke.yaml's own checkpoint_s3_path.
+  checkpoint_s3_path: "s3://your-bucket/checkpoints/sft-verl-train-smoke"
+
+container:
+  recipe: verl_sft
+
+# No `data:` section — merge_lora_only never touches training data at all
+# (see _validate_data_required's matching exemption). No `secrets:`/`task:`
+# either, same reason as the train smoke test.

@@ -1,0 +1,92 @@
+# Perf-test template — measure serving throughput under load
+#
+# Starts `vllm serve` on the instance, waits for /health, then drives it with
+# Gatling at each TPS level in turn and writes a result summary to S3.
+#
+#   rl-train validate-perf --config examples/configs/perf_test_example.yaml
+#   rl-train perf-test     --config examples/configs/perf_test_example.yaml
+#
+# For a 13-minute version of this on a small model, see
+# examples/smoke_tests/perf_test_smoke.yaml. Full guide:
+# docs/launching-performance-test.md.
+
+version: 1
+
+job:
+  name: perf-test-example
+  max_runtime_hours: 4
+
+model:
+  # HF id, or an `s3://.../` prefix of pre-staged weights. Prefer S3 at >=10B:
+  # concurrent ranks racing on the HF cache is a known source of flaky
+  # "shard N not found" failures.
+  name: Qwen/Qwen3.5-27B
+
+perf_test:
+  name: baseline
+  instance_type: ml.p5.48xlarge
+  instance_count: 1
+  volume_size_gb: 500
+
+  serving:
+    port: 8080
+    # Shard the model across GPUs. tensor_parallel_size x data-parallel-size
+    # must not exceed the GPUs on the instance (8 on p5.48xlarge).
+    tensor_parallel_size: 4
+    gpu_memory_utilization: 0.9
+    max_model_len: 8192
+    # The ceiling on concurrent sequences. Too low and requests queue, which
+    # shows up as a latency cliff rather than an error.
+    max_num_seqs: 256
+    # Must match `"model"` in your chat-config.json, or every request 404s.
+    served_model_name: perf-target
+    trust_remote_code: true
+    # Leave CUDA graphs on for real measurements — worth roughly 14% throughput.
+    enforce_eager: false
+    enable_prefix_caching: true
+    startup_timeout: 1800
+    # Escape hatch for any `vllm serve` flag without a dedicated schema field.
+    # Keys are flag names without the leading `--`; values are stringified.
+    extra_args:
+      data-parallel-size: "2"
+
+  gatling:
+    # Which simulation to run is the main modelling decision here:
+    #
+    #   ThrottledTpsCsvSimulation    paced to a target TPS (this file)
+    #   ThrottledTpsJsonlSimulation  same, replaying production request bodies
+    #   ClosedConcurrencySimulation  fixed N users flat out — use for sizing
+    #   JsonlChatCompletionsSimulation / open-model variants — fixed arrival rate
+    #
+    # docs/launching-performance-test.md has the full catalogue and guidance on
+    # choosing. For per-instance sizing, sweep N with the closed model and read
+    # the highest SLO-respecting mean req/s.
+    simulation_class: org.foresightrl.perf.ThrottledTpsCsvSimulation
+    data_s3_path: "s3://your-bucket/perf_test/data/"
+    # Each level is a separate timed run against the same warm server.
+    tps_levels: [5, 10, 20, 40]
+    duration_seconds: 300
+
+  # Strongly recommended. Without it the job egresses through SageMaker's
+  # shared, service-managed NAT, and Maven Central rate-limits that aggregate
+  # (HTTP 429) while Gradle resolves the Gatling plugin classpath. A VPC moves
+  # egress to your own NAT address and avoids it.
+  #
+  # vpc:
+  #   subnets:
+  #     - subnet-xxxxxxxxxxxxxxxxx
+  #   security_groups:
+  #     - sg-xxxxxxxxxxxxxxxxx
+
+execution:
+  type: aws_training_job
+
+output:
+  s3_path: "s3://your-bucket/output/perf-test-example/"
+
+container:
+  recipe: qwen3_5
+  # Simulations from an extension package need it named here, which both stages
+  # the Python and copies its perf_test/gatling_java/ tree into the Gatling
+  # source set:
+  # extra_packages: ["my_extension"]

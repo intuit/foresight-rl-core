@@ -1,0 +1,62 @@
+# Built-in benchmark catalog (OSS).
+#
+# Deliberately tiny. These two entries exist to prove the two tiers work end to
+# end -- they run offline, need no dataset file, no network, and no credentials,
+# so `rl-train evaluate` against `provider: echo` is a complete smoke test of
+# the wiring.
+#
+# Real benchmarks are *data*, not code: they belong in a catalog file shipped by
+# an extension package (registered via
+# `foresightrlcore.evaluate.catalog.register_catalog`) or passed through
+# `evaluate.catalog_paths`. A catalog entry naming an internal host, bucket, or
+# account must never appear in this file -- `scripts/check_intuit_fingerprints.sh`
+# fails the build if one does.
+
+benchmarks:
+  # Tier 1 (record): the runner drives the loop, one question at a time.
+  - name: demo_mcq
+    type: mcq
+    display_name: Demo multiple choice
+    metrics: [choice_match]
+    dataset:
+      loader: inline
+      records:
+        - id: capital
+          question: What is the capital of France?
+          choices: [Berlin, Madrid, Paris, Rome]
+          answer: Paris
+        - id: arithmetic
+          question: What is 12 x 12?
+          choices: ["124", "144", "121", "132"]
+          answer: "144"
+        - id: planet
+          question: Which planet is closest to the Sun?
+          choices: [Venus, Mercury, Mars, Earth]
+          answer: Mercury
+
+  # Tier 2 (harness): the benchmark drives its own loop and grades each
+  # scenario check by check, reporting binary / fractional_micro /
+  # fractional_macro.
+  - name: demo_scenarios
+    type: scenario_suite
+    display_name: Demo scenario suite
+    params:
+      grader: normalized
+      primary: binary
+    dataset:
+      loader: inline
+      records:
+        - id: invoice
+          question: >-
+            An invoice totals 120.00 USD and is 30 days overdue.
+            Report its status and the amount owed.
+          answer:
+            status: overdue
+            amount: "120.00"
+        - id: payment
+          question: >-
+            A customer paid 75.50 USD against an invoice of 75.50 USD.
+            Report its status and the remaining balance.
+          answer:
+            status: paid
+            balance: "0.00"

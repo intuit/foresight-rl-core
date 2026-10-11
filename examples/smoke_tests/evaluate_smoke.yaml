@@ -1,0 +1,34 @@
+# Offline smoke test for the evaluate operation.
+#
+# Runs both benchmark tiers against the `echo` provider, which is a
+# deterministic in-process backend -- no GPU, no credentials, no network. The
+# scores are meaningless; what this proves is that the whole path works:
+# catalog -> dataset loader -> endpoint -> benchmark -> metric -> report.
+#
+#   rl-train validate-evaluate --config examples/smoke_tests/evaluate_smoke.yaml
+#   rl-train evaluate --config examples/smoke_tests/evaluate_smoke.yaml
+
+version: 1
+
+job:
+  name: evaluate-smoke
+  max_runtime_hours: 1
+
+execution:
+  type: local
+  local:
+    output_dir: /tmp/evaluate_smoke
+
+evaluate:
+  # Both entries resolve against the built-in catalog, so one line each.
+  benchmarks:
+    - name: demo_mcq       # record tier
+    - name: demo_scenarios # harness tier
+
+  models:
+    - name: echo-model
+      provider: echo
+
+  trials: 1
+  concurrency: 2
+  reporters: [table, json]

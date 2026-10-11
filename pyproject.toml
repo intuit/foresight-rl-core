@@ -1,0 +1,100 @@
+[project]
+name = "foresightrlcore"
+# DO NOT MANUALLY CHANGE THE VERSION!
+# It will be automagically updated by the release pipeline.
+version = "0.8.9.dev1"
+description = "Multi-method, multi-provider training library for reinforcement learning fine-tuning"
+authors = [
+    { name = "Ofir Ben Shoham" },
+    { name = "Yakov Gazman" },
+]
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10,<3.14"
+
+dependencies = [
+    "pydantic >=2.0.0",
+    "pyyaml",
+    "requests",
+    "typing_extensions >=4.0",
+]
+
+[project.optional-dependencies]
+aws = ["boto3 >=1.28", "sagemaker >=3.0.0"]
+# Keep these in step with foresightrlcore/config/requirements/{optimizer,evaluate}.txt,
+# which is what the container installs. langchain_openai is needed by any run
+# that talks to an OpenAI-compatible provider -- local `vllm serve` generation
+# and the Genos client both import it -- so leaving it out makes a config that
+# works on SageMaker fail on a laptop.
+optimizer = ["pandas >=2.0", "pyarrow >=14.0", "langchain_openai >=0.3.0"]
+evaluate = ["pandas >=2.0", "pyarrow >=14.0", "langchain_openai >=0.3.0"]
+# `rl-train tokenize-pack` (foresightrlcore/tokenizer/) runs standalone on a
+# laptop/CI box, deliberately outside the GPU training stack — but it still
+# needs a real transformers install (AutoTokenizer + apply_chat_template),
+# pandas/pyarrow (packed Parquet output), and boto3 (an s3:// --input/
+# --tokenizer/--upload-to). None of those were ever declared anywhere,
+# reproduced directly: `ModuleNotFoundError: No module named 'transformers'`
+# on a fresh checkout with no other extras installed. transformers>=5.15.0
+# is the newest floor any currently-supported model.profile actually needs
+# (Muse Glimmer's tokenizer class doesn't exist below it, per
+# model_profiles.py) — newer transformers is backward-compatible for
+# simpler/older tokenizers too, so this is just a floor, not a per-model pin.
+tokenizer = ["transformers >=5.15.0", "pandas >=2.0", "pyarrow >=14.0", "boto3 >=1.28"]
+intuit = []
+
+[project.scripts]
+rl-train = "foresightrlcore.cli:main"
+
+[project.entry-points."foresightrlcore.plugins"]
+# Intuit extension registers via foresightrl-intuit package (uv pip install -e intuit/)
+
+[dependency-groups]
+dev = [
+    "black >=25.9.0",
+    "isort >=7.0.0,<8.0.0",
+    "mypy >=1.18.1,<2.0.0",
+    "types-PyYAML",
+    "types-requests",
+]
+test = [
+    "pytest >=8.4.0",
+    "pytest-cov >=7.0.0,<8.0.0",
+    "pytest-xdist >=3.8.0,<4.0.0",
+    "tox >=4.26.0,<5.0.0",
+    "tox-uv >=1.28.0",
+    # Needed to run tests/tasks/test_math_task.py (otherwise skipped via
+    # importorskip, which silently zeroes out coverage for the `math` task).
+    # No antlr4 extra here (unlike the qwen3 container recipe) — it pins an
+    # antlr4-tools version that conflicts with sagemaker's; plain math-verify
+    # is enough to exercise accuracy_score's parse/verify logic in tests.
+    "math-verify >=0.9.0",
+]
+
+
+[tool.uv.build-backend]
+module-name = "foresightrlcore"
+module-root = ""
+source-exclude = ["intuit/**", "scripts/check_intuit_fingerprints.sh"]
+
+[tool.black]
+line-length = 88
+target-version = ['py310','py311','py312','py313','py314']
+
+[tool.isort]
+profile = "black"
+
+[tool.pytest.ini_options]
+pythonpath = ". intuit"
+testpaths = [
+    "tests",
+    "intuit/tests",
+]
+looponfailroots = ["foresightrlcore", "tests"]
+addopts = "-p no:warnings -o log_cli=true --log-cli-level=INFO"
+markers = [
+    "requires_intuit: needs the foresightrl-intuit extension; skipped in the OSS-only env",
+]
+
+[build-system]
+requires = ["uv_build>=0.9.3,<0.10.0"]
+build-backend = "uv_build"

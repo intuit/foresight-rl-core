@@ -1,0 +1,66 @@
+---
+description: Use uv exclusively for Python package management — never pip, pip install, or pip uninstall
+globs: 
+alwaysApply: true
+---
+
+# UV-Only Package Management
+
+## Rule
+
+**NEVER use `pip` for installing, removing, or managing packages.** Always use `uv` instead.
+
+## Virtual Environment
+
+- The virtual environment lives at `.venv/` in the project root.
+- To create: `uv venv .venv`
+- Always activate before running Python: `source .venv/bin/activate`
+- If `.venv/` does not exist, **stop and tell the user** to create it with `uv venv .venv`.
+
+## Installing Packages
+
+```bash
+# Install project in editable mode with all extras
+source .venv/bin/activate && uv pip install -e ".[aws]"
+
+# Install dev/test dependency groups
+source .venv/bin/activate && uv pip install --group dev --group test
+
+# Add a new dependency
+uv add <package>
+
+# Add a new dev dependency
+uv add --group dev <package>
+
+# Add a new optional dependency (e.g. aws extra)
+uv add --optional aws <package>
+```
+
+## Removing Packages
+
+```bash
+uv remove <package>
+```
+
+## Forbidden Commands
+
+These commands must NEVER be used:
+- `pip install ...`
+- `pip uninstall ...`
+- `pip install -r requirements.txt`
+- `python -m pip ...`
+
+Always replace with the `uv` equivalent.
+
+## Quick Reference
+
+| Task | Command |
+|------|---------|
+| Create venv | `uv venv .venv` |
+| Install project (editable) | `uv pip install -e ".[aws]"` |
+| Install dev deps | `uv pip install --group dev --group test` |
+| Add runtime dep | `uv add <pkg>` |
+| Add dev dep | `uv add --group dev <pkg>` |
+| Add optional dep | `uv add --optional aws <pkg>` |
+| Remove dep | `uv remove <pkg>` |
+| Sync lockfile | `uv sync` |

@@ -1,0 +1,57 @@
+---
+description: Always run uv run tox and fix all lint/test failures before considering any code change complete
+globs: 
+alwaysApply: true
+---
+
+# Pre-Commit Quality Gate
+
+## Rule
+
+**Every code change must pass `uv run tox` before it is considered complete.** This is non-negotiable — no exceptions for "small" or "obvious" changes.
+
+## What tox Runs
+
+| Environment | Tools | What it checks |
+|-------------|-------|----------------|
+| `lint` | isort → black → mypy | Import order, formatting, type safety |
+| `py311` | pytest + coverage | Tests on Python 3.11 |
+| `py312` | pytest + coverage | Tests on Python 3.12 |
+| `py313` | pytest + coverage | Tests on Python 3.13 |
+
+## Workflow
+
+After making any code change:
+
+1. **Run the full suite:**
+   ```bash
+   source .venv/bin/activate && uv run tox
+   ```
+
+2. **If lint fails**, fix in this order:
+   - **isort** → auto-fix: `source .venv/bin/activate && uv run isort .`
+   - **black** → auto-fix: `source .venv/bin/activate && uv run black .`
+   - **mypy** → manually fix type annotations in reported files
+
+3. **If tests fail**, fix the root cause — not the test (unless the test itself is wrong).
+
+4. **Re-run `uv run tox`** after every fix until exit code 0.
+
+5. **Only then** consider the change ready for commit/PR.
+
+## Quick Lint-Only Check
+
+For a faster feedback loop during development, run lint alone first:
+
+```bash
+source .venv/bin/activate && uv run tox -e lint
+```
+
+Then run the full suite before finalizing.
+
+## Key Constraints
+
+- **Never skip tox** — even for README changes (mypy and tests may reference docs).
+- **Never auto-format blindly** — review what isort/black changed to ensure it's correct.
+- **Fix only what's broken** — don't refactor unrelated code while fixing lint/test failures.
+- **One category at a time** — fix all isort issues, then black, then mypy, then tests.
