@@ -304,6 +304,8 @@ If you use foresight-rl-core or find this repository useful for your research or
 @software{shoham2026foresightrlcore,
     title={ForesightRLCore},
     author={Shoham, Ofir Ben and Gazman, Yakov},
+    license={Apache-2.0},
+    url={https://github.com/intuit/foresight-rl-core},
     year={2026}
 }
 ```
