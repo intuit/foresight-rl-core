@@ -1,0 +1,100 @@
+# SageMaker Serverless Model Customization — Reference Template
+#
+# Comprehensive reference for all serverless options across DPO, RLVR, and RLAIF.
+# Copy this file, uncomment the sections relevant to your method, and launch:
+#   AWS_DEFAULT_REGION=us-west-2 rl-train train --config my_serverless_config.yaml
+#
+# Supported methods: dpo | rlvr | rlaif
+# No infrastructure management needed — no instance types, vLLM, or DeepSpeed.
+
+version: 1
+
+job:
+  name: serverless-example
+
+model:
+  name: huggingface-llm-qwen2-5-7b-instruct
+
+method:
+  type: dpo                              # dpo | rlvr | rlaif
+
+execution:
+  type: aws_serverless
+  serverless:
+    model_id: huggingface-llm-qwen2-5-7b-instruct
+    training_type: lora                  # lora | full
+    accept_eula: true
+
+    # ── Dataset references (AI Registry get-or-create) ─────────────────
+    # If the dataset name exists in AI Registry, it is reused.
+    # If new, provide a source (S3 URI or local path) to auto-create it.
+    training_dataset_name: my-train-dataset
+    # training_dataset_source: "s3://bucket/path/train.jsonl"
+    # training_dataset_source: "./data/train.jsonl"     # local file → auto-upload to S3
+
+    # validation_dataset_name: my-val-dataset
+    # validation_dataset_source: "s3://bucket/path/val.jsonl"
+
+    # test_dataset_name: my-test-dataset
+    # test_dataset_source: "s3://bucket/path/test.jsonl"
+
+    # DPO only: dataset technique hint for DataSet.create
+    # customization_technique: dpo
+
+    # ── Model versioning ───────────────────────────────────────────────
+    model_package_group: my-model-package-group
+    # model_package_group_description: "Fine-tuned Qwen2.5-7B for my use case"
+
+    # ── RLAIF-specific: reward model + prompt ──────────────────────────
+    # reward_model_id: "openai.gpt-oss-120b-1:0"
+
+    # Reward prompt — reference an existing evaluator or auto-create one:
+    # reward_prompt_name: my-reward-prompt
+    # reward_prompt_source: "s3://bucket/path/reward_prompt.txt"
+    # reward_prompt_text: |
+    #   You are an expert evaluator. Given a prompt and response, rate 1-10.
+
+    # ── RLVR-specific: custom reward function ──────────────────────────
+    # custom_reward_function_name: my-reward-evaluator
+
+    # ── MLflow tracking ────────────────────────────────────────────────
+    mlflow_experiment_name: serverless-example
+    # mlflow_run_name: run-001
+    # mlflow_resource_arn: "arn:aws:sagemaker:us-west-2:123456789012:mlflow-tracking-server/my-server"
+
+    # ── Job configuration ──────────────────────────────────────────────
+    # base_job_name: custom-job-prefix
+    # kms_key_id: "arn:aws:kms:us-west-2:123456789012:key/my-key-id"
+    # max_runtime_seconds: 86400          # 24 hours
+    # wait_timeout: 86400
+    # tags:
+    #   team: my-team
+    #   project: my-project
+
+    # ── VPC / networking ───────────────────────────────────────────────
+    # networking:
+    #   subnets: ["subnet-XXXXX"]
+    #   security_groups: ["sg-XXXXX"]
+
+    # ── Evaluation settings (future Phase 2) ───────────────────────────
+    # evaluator_model: "amazon.nova-pro-v1:0"
+    # builtin_metrics: ["perplexity", "rouge"]
+    # custom_metrics:
+    #   - name: my_metric
+    #     definition: "..."
+    # benchmark: "MATH"
+
+    # ── Deployment settings (future Phase 3) ───────────────────────────
+    # inference_instance_type: ml.g5.2xlarge
+    # inference_container_version: "0.31.0"
+
+training:
+  serverless:
+    global_batch_size: 64
+    # max_epochs: 3
+    # learning_rate: 5.0e-05
+    # extra:                              # Pass-through hyperparameters
+    #   custom_param: value
+
+output:
+  s3_path: "s3://your-bucket/output/serverless-example"

@@ -1,0 +1,9 @@
+# Perf-test requirements for qwen3 recipe.
+# The DJL inference base image provides vLLM + Java + CUDA, so this list is
+# limited to the lightweight orchestrator deps the runner needs.
+py-markdown-table>=1.1.0
+psutil>=7.0.0
+requests>=2.32.4
+pydantic>=2.0.0
+pyyaml
+boto3>=1.34

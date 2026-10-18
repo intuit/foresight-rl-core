@@ -1,0 +1,27 @@
+// Repositories for the buildscript ':classpath' configuration (the `plugins {}`
+// block in build.gradle). Without this block Gradle defaults to
+// gradlePluginPortal() alone, which is not enough here: the portal serves
+// plugin *markers* directly but answers requests for a plugin's transitive
+// dependencies with a 303 redirect to repo.maven.apache.org. That host is not
+// reachable from the SageMaker VPC the perf-test job runs in, so resolving
+// io.gatling:gatling-enterprise-plugin-commons failed and every `gradle
+// gatlingRun` died during configuration:
+//
+//   > Could not resolve all artifacts for configuration ':classpath'.
+//      > Could not resolve io.gatling:gatling-enterprise-plugin-commons:1.9.3.
+//
+// repo1.maven.org is listed first so transitive artifacts resolve from a
+// directly reachable mirror and never depend on the portal's redirect; the
+// portal still follows for the plugin markers, which only it publishes.
+// This mirrors the project-level repositories already in build.gradle.
+pluginManagement {
+    repositories {
+        maven {
+            url = uri("https://repo1.maven.org/maven2/")
+        }
+        gradlePluginPortal()
+        mavenCentral()
+    }
+}
+
+rootProject.name = 'foresight-perf-test'

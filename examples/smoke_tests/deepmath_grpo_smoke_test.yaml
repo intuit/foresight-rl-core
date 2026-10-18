@@ -1,0 +1,137 @@
+# GRPO DeepMath Training — g6 Colocate Smoke Test
+
+version: 1
+
+job:
+  name: deepmath-grpo-06b-g6-smoke
+  max_runtime_hours: 4
+
+infra:
+  topology: single_node
+  # server mode (not colocate): vLLM gets its own GPU so it doesn't share the
+  # training GPUs' 24 GB. Colocate OOM'd on L4 — the GRPO logits/temperature
+  # step needs several GB on top of vLLM's KV cache on the same card.
+  vllm_mode: server
+  vllm_gpu_count: 1               # GPU 0 -> vLLM
+  training_gpu_count: 3           # GPUs 1-3 -> training
+  instance_type: ml.g6.12xlarge   # 4x L4 (24GB each)
+  instance_count: 1
+  keep_alive_seconds: 0
+  # 500 GB matches the proven dedicated_vllm smoke test. The qwen3 recipe's
+  # pip layer (torch 2.9 + vLLM 0.12 + full CUDA 12.8 wheels) on top of the DLC
+  # image is large; 200 GB overran the volume during container setup and
+  # SageMaker failed the job ("use an instance type with more memory, or
+  # reduce the size of job data").
+  volume_size_gb: 500
+
+  vllm:
+    host: "0.0.0.0"
+    port: 8002
+    tensor_parallel_size: 1
+    gpu_memory_utilization: 0.85
+    max_model_len: 4096
+    enforce_eager: false
+    startup_timeout: 1800
+
+  # infra.vpc intentionally omitted — job runs with default SageMaker
+  # networking, no subnets/security-groups required.
+
+method:
+  type: grpo
+
+execution:
+  type: aws_training_job
+
+model:
+  name: Qwen/Qwen3-0.6B
+  enable_thinking: true
+  lora:
+    r: 16
+    alpha: 64
+    dropout: 0.05
+    target_modules:
+      - q_proj
+      - k_proj
+      - v_proj
+      - o_proj
+      - gate_proj
+      - up_proj
+      - down_proj
+
+training:
+  epochs: 1
+  per_device_batch_size: 1        # L4 24GB is tight under GRPO; keep small
+  gradient_accumulation_steps: 4
+  learning_rate: 5.0e-05
+  lr_scheduler: cosine
+  warmup_ratio: 0.03
+  bf16: true
+  gradient_checkpointing: true
+  deepspeed: ds_zero2_lora_config.json
+  logging_steps: 1
+  save_steps: 50
+  eval_steps: 100
+  report_to: tensorboard
+  max_steps: 5
+
+  grpo:
+    # 6 (not 8): TRL requires generation_batch_size (= per_device_batch_size x
+    # training_gpu_count x scaling = 1 x 3 x scaling = 12) to be divisible by
+    # num_generations. 12 % 8 != 0 but 12 % 6 == 0. The 3-training-GPU split on
+    # g6 drives this; keep num_generations a divisor of 12.
+    num_generations: 6
+    # 2048 matches the observed DeepMath completion distribution on the p4d
+    # repro run: mean 732, max ~1838, only ~0.8% clipped at 2048. A 1024 cap
+    # would truncate the long tail (truncated = no \boxed{} = reward 0), so
+    # keep 2048 and control L4 memory via the vLLM/training GPU split +
+    # per_device_batch_size: 1 instead (logits scale with batch x length).
+    max_completion_length: 2048
+    beta: 0.001
+    epsilon: 0.2
+    epsilon_high: 0.28
+    loss_type: dr_grpo
+    temperature: 0.6
+    top_p: 0.95
+    top_k: 20
+    scale_rewards: false
+    mask_truncated_completions: false
+    vllm_importance_sampling_correction: false
+    num_iterations: 1
+
+data:
+  # Required by schema, but the `math` task loads trl-lib/DeepMath-103K from the
+  # HF Hub and ignores this path. MUST point at a TINY prefix — SageMaker
+  # downloads the ENTIRE prefix into the container volume before training
+  # starts, so a large prefix stalls the job in "Downloading input data".
+  # This placeholder holds a single 22-byte file. s3:// is required by both
+  # this repo's validation and the SageMaker input-channel API — cannot be a
+  # local path while execution.type is aws_training_job.
+  train_path: "s3://your-bucket/placeholder/deepmath/"
+  eval_split_size: 10
+
+output:
+  # s3:// is required by the SageMaker CreateTrainingJob API
+  # (OutputDataConfig.S3OutputPath) — inherent to the API, not this codebase.
+  s3_path: "s3://your-bucket/output/deepmath-grpo-06b-g6-smoke"
+  checkpoint_s3_path: "s3://your-bucket/checkpoints/deepmath-grpo-06b-g6-smoke"
+
+environment:
+  NCCL_DEBUG: "INFO"
+  # flash-attn source-build parallelism. MUST scale to host RAM, not vCPU:
+  # each nvcc unit peaks at several GB and too many concurrently OOM the host,
+  # which SageMaker misreports as "use an instance type with more memory".
+  # g6.12xlarge has only 192 GB RAM, so keep this low (8). The entrypoint
+  # default is 4 if unset.
+  FLASH_ATTN_MAX_JOBS: "8"
+
+container:
+  recipe: qwen3
+
+task:
+  type: math
+  config:
+    hf_dataset: trl-lib/DeepMath-103K
+    hf_split: train
+    max_samples: 200
+    shuffle_seed: 42
+    predictions_log: "logs/grpo_deepmath_predictions.jsonl"

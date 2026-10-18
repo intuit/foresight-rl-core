@@ -1,0 +1,29 @@
+# Built-in OSS prompt set: `single_v1`.
+#
+# Pairs with the `single_call` mode, which renders section `single`, key
+# `prompt`, substituting every key of a record's `inputs` mapping.
+#
+# It deliberately uses exactly one placeholder. The renderer only substitutes
+# variables a record actually supplies, so a placeholder the dataset does not
+# provide would survive into the prompt as literal text and silently corrupt
+# the evaluation. One required variable keeps this set usable with any dataset
+# that maps a single column:
+#
+#   optimizer:
+#     prompt_set: single_v1
+#     datasets:
+#       - name: parquet
+#         path: s3://your-bucket/eval.parquet
+#         input_columns: {input: question}
+#         reference_column: answer
+#
+# The prompt is a pass-through: the dataset column carries the full text sent
+# to the candidate model. That is the neutral baseline for comparing models on
+# prompts you already have, and it adds no instructions that would skew the
+# comparison. For anything richer -- system framing, few-shot examples, extra
+# placeholders -- copy this file, edit it, and point `optimizer.prompts_path`
+# at your copy, which overrides the registered default.
+
+single:
+  prompt: |
+    {input}

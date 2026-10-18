@@ -1,0 +1,93 @@
+# OSS Quickstart — GRPO on SageMaker with no proprietary dependencies
+#
+# Every other template in this directory uses the `advice` task, which ships in
+# the optional foresightrl-intuit extension and needs Genos/IDPS credentials.
+# This one is the open-source path: a built-in task, Bedrock for the LLM judge,
+# and no `secrets:` block at all.
+#
+#   rl-train validate --config examples/configs/oss_quickstart.yaml
+#   rl-train train    --config examples/configs/oss_quickstart.yaml
+#
+# Before launching, replace every `your-bucket` placeholder and confirm the
+# SageMaker execution role can call `bedrock:InvokeModel` on the judge model.
+# `validate` deliberately does not check either — it never touches the network.
+#
+# This file is validated by tests/test_oss_standalone.py, so it cannot silently
+# drift out of sync with the schema.
+
+job:
+  name: oss-quickstart-grpo
+  max_runtime_hours: 6
+
+method:
+  type: grpo
+
+execution:
+  type: aws_training_job
+
+infra:
+  topology: single_node
+  vllm_mode: server
+  instance_type: ml.g5.12xlarge
+  instance_count: 1
+  vllm_gpu_count: 1
+  training_gpu_count: 3
+
+  vllm:
+    port: 8002
+    tensor_parallel_size: 1
+    gpu_memory_utilization: 0.9
+
+model:
+  # A small model keeps the first run cheap. Any HF id works, as does an
+  # `s3://.../` prefix of pre-staged weights (recommended at >=10B).
+  name: Qwen/Qwen3-0.6B
+  lora:
+    r: 16
+    alpha: 32
+    dropout: 0.05
+
+training:
+  epochs: 1
+  per_device_batch_size: 1
+  gradient_accumulation_steps: 4
+  learning_rate: 5.0e-05
+  bf16: true
+  gradient_checkpointing: true
+  logging_steps: 5
+  save_steps: 50
+  report_to: tensorboard
+
+  grpo:
+    num_generations: 4
+    max_completion_length: 1024
+    beta: 0.001
+    loss_type: dr_grpo
+    temperature: 0.7
+
+data:
+  train_path: "s3://your-bucket/data/train.jsonl"
+  eval_split_size: 50
+
+output:
+  s3_path: "s3://your-bucket/output/oss-quickstart"
+
+container:
+  recipe: qwen3_5
+
+# No `secrets:` section: Bedrock authenticates with the SageMaker execution
+# role. The `idps` provider lives in the extension; OSS users who do need
+# secrets can use `provider: local` with a .env file.
+
+task:
+  # Built-in OSS task. `rl-train serverless list datasets` shows what else is
+  # registered, including anything your own extension package adds.
+  type: email_outcome
+  config:
+    llm_clients:
+      # Single client at the conventional name `default`.
+      default:
+        provider: bedrock
+        bedrock:
+          model_id: "anthropic.claude-3-haiku-20240307-v1:0"
+          region: us-west-2

@@ -1,0 +1,73 @@
+# Serverless reward function contract
+
+When adding or modifying a SageMaker Serverless reward Lambda, follow
+this contract.
+
+## Folder layout
+
+Per-task code lives under `foresightrlcore/tasks/<task>/`:
+
+| File              | Purpose                                                  | Deps allowed                    |
+|-------------------|----------------------------------------------------------|---------------------------------|
+| `__init__.py`     | Register lambda + converter + dataset; re-export protocol | stdlib only                     |
+| `trainer.py`      | TRL reward, dataset loader, callbacks                    | training stack                  |
+| `judge_logic.py`  | Shared scoring math + prompts                            | stdlib only                     |
+| `lambda_reward.py`| AWS Lambda handler                                       | stdlib + boto3 (+ helpers)      |
+| `convert.py`      | JSONL → schema mapper                                    | stdlib + foresightrlcore.serverless.spec |
+
+Generic helpers live under `foresightrlcore/serverless/` — **never**
+copy boto3 retry policy or sample-IO parsing into a task; reuse
+`BedrockJudge`, `coerce_batch`, `extract_response`, `extract_state`.
+
+## Registry
+
+Register **once**, in `__init__.py`, using the same name you'll write
+as `custom_reward_function_name` in YAML. Don't add a separate
+`custom_reward_function_lambda` field — the name is the identifier.
+
+```python
+from foresightrlcore.serverless import registry
+
+registry.register_lambda(name=..., main_module=..., extra_modules=[...])
+registry.register_converter(name=..., mapper="pkg.mod:fn", schemas={"rlvr"})
+```
+
+## Bundler markers
+
+Wrap cross-module imports in `lambda_reward.py` (and any helper file
+imported across modules) with:
+
+```python
+# BUNDLER_STRIP_BEGIN
+try:
+    from judge_logic import ...   # Lambda runtime: same-zip flat root
+except ImportError:
+    from foresightrlcore.tasks.<task>.judge_logic import ...   # local dev
+# BUNDLER_STRIP_END
+```
+
+The bundler strips these blocks when producing the single-file Studio
+bundle (`rl-train serverless bundle`). Without the markers the bundled
+file has stray import lines that fail at Lambda runtime.
+
+## Never do
+
+* Inline boto3 client setup or retry logic in `lambda_reward.py`.
+  Use `BedrockJudge` instead.
+* Copy `_extract_response` / `_extract_state` / `_coerce_batch` into a
+  task. They live in `foresightrlcore/serverless/helpers/sample_io.py`.
+* Add a new `custom_reward_function_*` schema field. The existing
+  `custom_reward_function_name` + `custom_reward_function_source` pair
+  covers both registered Lambdas and one-off escape hatches.
+* Hardcode an IAM role ARN, account ID, or S3 bucket in a registered
+  `LambdaSpec`. Everything that varies per environment goes in the
+  user's YAML config.
+
+## Always do
+
+* Add a test for any new converter in
+  `tests/tasks/<task>/test_convert.py` exercising round-trip schema
+  validation.
+* Run `uv run tox` before considering the change complete.
+* When adding a new task, also register it in the appropriate row of
+  `docs/serverless-reward-functions.md` (table at the bottom).

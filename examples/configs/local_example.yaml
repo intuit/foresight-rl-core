@@ -1,0 +1,71 @@
+# Local GPU quickstart — GRPO with no AWS account.
+#
+# Runs on one NVIDIA GPU. The dataset is the JSONL next to this repo.
+# Reward scoring is rule_based, so there is no judge and no secrets block.
+# The first launch downloads Qwen/Qwen3-0.6B from Hugging Face.
+#
+# From the repository root, on the GPU machine:
+#
+#   uv pip install -e "."
+#   rl-train setup-local-gpu --recipe qwen3
+#   pip install -r local-requirements.txt
+#   rl-train validate --config examples/configs/local_example.yaml
+#   rl-train train --config examples/configs/local_example.yaml
+#
+# Paths are relative to the directory you launch from. Stay at the repo root.
+# Checkpoints land in output/local-email-outcome/.
+#
+# vllm_mode: none keeps training on GPU 0. A separate vLLM process needs
+# another GPU: set vllm_mode: server and list both ids in execution.local.gpus.
+
+job:
+  name: local-email-outcome
+
+method:
+  type: grpo
+
+execution:
+  type: local
+  local:
+    gpus: "0"
+
+infra:
+  topology: single_node
+  vllm_mode: none
+
+model:
+  name: Qwen/Qwen3-0.6B
+  lora:
+    r: 16
+    alpha: 32
+    dropout: 0.05
+
+training:
+  epochs: 1
+  per_device_batch_size: 1
+  gradient_accumulation_steps: 4
+  learning_rate: 5.0e-05
+  bf16: true
+  gradient_checkpointing: true
+  logging_steps: 1
+  save_steps: 50
+  report_to: tensorboard
+
+  grpo:
+    num_generations: 4
+    max_completion_length: 512
+    beta: 0.001
+    loss_type: dr_grpo
+    temperature: 0.7
+
+data:
+  train_path: examples/datasets/email_outcome/train.jsonl
+  eval_split_size: 2
+
+output:
+  s3_path: output/local-email-outcome
+
+task:
+  type: email_outcome
+  config:
+    reward_mode: rule_based

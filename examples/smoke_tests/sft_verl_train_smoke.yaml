@@ -1,0 +1,108 @@
+# sft_verl train smoke — Qwen3-0.6B on one p4d.24xlarge, 3 optimizer steps.
+#
+# The cheapest end-to-end exercise of the sft_verl training path:
+#
+#   YAML -> TrainingJobConfig -> aws_sagemaker_launcher
+#     -> SageMaker SDK-native Torchrun -> train.py -> VerlSftMethodHandler.run()
+#     -> verl.trainer.sft_trainer.SFTTrainer (FSDP2 + LoRA)
+#
+# Nothing here is vendor-specific: a public HF model, the tiny messages-format
+# rows in sft_verl_data/, and no `secrets:`/`task:` block (sft_verl has no
+# reward function or LLM judge — those sections don't apply to this method at
+# all). Single node, not two — a multi-node run is a real training job, not a
+# smoke test; see docs/launching-sft-verl.md for the full production recipe.
+#
+# There is no cheaper *recognized* instance family for this: sft_verl's
+# flash-attn wheel resolution (foresightrlcore.config.recipes.GPU_FAMILIES)
+# only has entries for 8-GPU p4d/p4de/p5/p5e/p5en/p6 families today — nothing
+# g5/g6-sized. This still runs in a few minutes at max_steps: 3, so the actual
+# spend is small even though the hourly rate isn't.
+#
+#   1. Upload the data:
+#        AWS_DEFAULT_REGION=us-west-2 aws s3 cp \
+#          examples/smoke_tests/sft_verl_data/train.jsonl \
+#          s3://your-bucket/sft_verl_smoke_data/train.jsonl
+#   2. Replace every `your-bucket` below.
+#   3. rl-train validate --config examples/smoke_tests/sft_verl_train_smoke.yaml
+#      rl-train train    --config examples/smoke_tests/sft_verl_train_smoke.yaml
+#
+# Expect a few minutes total and one LoRA-only checkpoint written to
+# output.checkpoint_s3_path at global_step_3. Follow up with
+# sft_verl_merge_smoke.yaml (same model.name/lora r+alpha) to exercise the
+# merge_lora_only path against that checkpoint.
+
+job:
+  name: sft-verl-train-smoke
+  max_runtime_hours: 1
+
+method:
+  type: sft_verl
+
+execution:
+  type: aws_training_job
+
+infra:
+  vllm_mode: none
+  instance_type: ml.p4d.24xlarge
+  instance_count: 1
+
+model:
+  # Public HF id, ~1.2 GB — no pre-staging needed at this size (see the S3
+  # model.name note in CLAUDE.md for models >=10B). No model.profile needed:
+  # Qwen3-0.6B has none of the LoRA-targeting/attn_implementation quirks a
+  # profile exists to paper over.
+  name: Qwen/Qwen3-0.6B
+  lora:
+    r: 8
+    alpha: 16
+    dropout: 0.0
+
+training:
+  # verl's SFTTrainer computes train_batch_size_per_dp = train_batch_size
+  # // dp_size (plain integer division, not an assert) and hands that
+  # straight to a real torch DataLoader(batch_size=...) — dp_size here
+  # equals world_size (8, one p4d.24xlarge node, ulysses_sequence_parallel_size
+  # left at its default of 1). train_batch_size MUST be >= world_size (8),
+  # or DataLoader(batch_size=0) crashes at trainer setup, after the
+  # instance is already billed. epochs: 3 (not 1) makes 3 epochs x
+  # steps_per_epoch(1, since 8 rows / train_batch_size 8 = 1 step/epoch)
+  # = 3 global steps, matching max_steps below exactly instead of stopping
+  # silently short of it after a single epoch.
+  epochs: 3
+  max_steps: 3   # smoke test — not a real training run. Remove for a real run.
+  learning_rate: 1.0e-4
+  logging_steps: 1
+  save_steps: 3
+  report_to: tensorboard
+
+  sft_verl:
+    data_format: messages   # sft_verl_data/train.jsonl already has a full messages list per row
+    max_length: 512          # real content here is a handful of tokens; generous margin
+    truncation: error
+    # Must be >= world_size (8 GPUs on one p4d.24xlarge node) — see the
+    # training: block's comment above. Also exactly matches the smoke
+    # dataset's 8 rows, so every GPU gets exactly one unique row per step.
+    train_batch_size: 8
+    save_freq: 3
+    # 'disable', not 'auto' — this is a smoke test, re-run repeatedly
+    # against the same output.checkpoint_s3_path; 'auto' would resume
+    # (model + dataloader state) from whatever a prior attempt left
+    # there, which can crash on a stale, incompatible dataloader state
+    # once anything dataloader-affecting changes between attempts. A
+    # smoke test should always start clean.
+    resume_mode: disable
+
+data:
+  train_path: "s3://your-bucket/sft_verl_smoke_data/"
+  # No eval_path — this is a smoke test, not a real training run.
+
+output:
+  s3_path: "s3://your-bucket/output/sft-verl-train-smoke"
+  checkpoint_s3_path: "s3://your-bucket/checkpoints/sft-verl-train-smoke"
+
+container:
+  recipe: verl_sft
+
+# No `secrets:` / `task:` sections — verl SFT has no reward function / LLM
+# judge / task plugin; those config sections are Optional and unused by
+# method.type: sft_verl.

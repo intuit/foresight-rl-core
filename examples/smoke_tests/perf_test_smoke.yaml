@@ -1,0 +1,101 @@
+# Perf-test smoke — Qwen3.5-0.8B on one g5.12xlarge
+#
+# The cheapest end-to-end exercise of the perf-test path:
+#
+#   YAML -> PerfTestJobConfig -> PerfTestSageMakerLauncher
+#     -> DJL inference container -> perf_entrypoint.sh
+#     -> foresightrlcore.perf_test.runner
+#     -> vllm serve + gradle gatlingRun
+#
+# Nothing here is vendor-specific: a public HF model, the synthetic prompts in
+# perf_test_data/, an OSS simulation class, and no `secrets:` block. Substitute
+# your bucket and it runs.
+#
+#   1. Upload the data:
+#        AWS_DEFAULT_REGION=us-west-2 aws s3 cp \
+#          examples/smoke_tests/perf_test_data/ \
+#          s3://your-bucket/perf_test/smoke_data/ \
+#          --recursive --exclude README.md
+#   2. Replace every `your-bucket` below.
+#   3. rl-train validate-perf --config examples/smoke_tests/perf_test_smoke.yaml
+#      rl-train perf-test     --config examples/smoke_tests/perf_test_smoke.yaml
+#
+# Expect roughly 13 minutes and two Gatling stages with KO=0. Reference numbers
+# from this exact config on g5.12xlarge: TPS=1 -> ~80 requests at 0.91 req/s,
+# TPS=2 -> ~131 requests at 1.46 req/s. Response times are high because a 0.8B
+# model on shared A10Gs is not the point; a clean KO=0 is.
+
+version: 1
+
+job:
+  name: perf-smoke-qwen35-08b
+  max_runtime_hours: 1
+
+model:
+  # Public HF id, ~1.6 GB, downloads in seconds. No pre-staging needed at this
+  # size (see the S3 `model.name` note in CLAUDE.md for models >=10B).
+  name: Qwen/Qwen3.5-0.8B
+
+perf_test:
+  name: smoke-tp1-2
+  instance_type: ml.g5.12xlarge   # cheapest 4-GPU box; only one GPU is used
+  instance_count: 1
+  volume_size_gb: 100
+
+  serving:
+    port: 8080
+    tensor_parallel_size: 1
+    gpu_memory_utilization: 0.8
+    max_model_len: 2048
+    max_num_seqs: 16
+    # Must equal `"model"` in perf_test_data/chat-config.json. vLLM 404s any
+    # request whose model name does not match the served alias, which shows up
+    # as KO=100% rather than as a startup error.
+    served_model_name: perf-smoke
+    trust_remote_code: true
+    # Skips CUDA-graph capture. Fine here because startup time dominates a
+    # 90-second run; leave it off for real sizing work, where graphs are worth
+    # ~14% throughput.
+    enforce_eager: true
+    enable_prefix_caching: false
+    startup_timeout: 900
+
+  gatling:
+    # OSS simulation: CSV-driven, throttled to a target TPS. The catalogue of
+    # simulations and how to choose between them is in
+    # docs/launching-performance-test.md.
+    simulation_class: org.foresightrl.perf.ThrottledTpsCsvSimulation
+    data_s3_path: "s3://your-bucket/perf_test/smoke_data/"
+    tps_levels: [1, 2]
+    duration_seconds: 60
+
+  # Optional, but recommended — see the note below.
+  #
+  # vpc:
+  #   subnets:
+  #     - subnet-xxxxxxxxxxxxxxxxx
+  #   security_groups:
+  #     - sg-xxxxxxxxxxxxxxxxx
+
+execution:
+  type: aws_training_job
+
+output:
+  s3_path: "s3://your-bucket/output/perf-smoke-qwen35-08b/"
+
+container:
+  recipe: qwen3_5   # resolves to the DJL inference image used for perf tests
+
+# ---------------------------------------------------------------------------
+# If Gatling dies with "Could not resolve io.gatling:..." and HTTP 429
+# ---------------------------------------------------------------------------
+# Gradle fetches its plugin classpath from Maven Central on every invocation.
+# Without a `vpc:` block the job egresses through SageMaker's service-managed
+# NAT — an address pool shared across every customer in the region — and Maven
+# Central rate-limits that aggregate. The runner retries with backoff, but under
+# sustained throttling the load stage never runs.
+#
+# Adding a VPC moves egress to your account's own NAT and clears it outright;
+# that is what fixed it here. An internal artifact mirror configured in
+# `foresightrlcore/perf_test/gatling/settings.gradle` is the more durable fix if
+# you run these often.

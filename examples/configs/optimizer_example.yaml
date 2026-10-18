@@ -1,0 +1,110 @@
+# Optimizer template — compare candidate models on quality and cost
+#
+# Evaluates the cross-product (dataset x model x mode): generate a response per
+# row, score it with the configured judges, price the token usage, and write
+# results.parquet plus a summary.md ranking the candidates.
+#
+#   rl-train validate-optimizer --config examples/configs/optimizer_example.yaml
+#   rl-train optimizer          --config examples/configs/optimizer_example.yaml
+#
+# Smaller starting point: examples/smoke_tests/optimizer_smoke.yaml.
+# Full guide: docs/launching-optimizer.md.
+
+version: 1
+
+job:
+  name: optimizer-example
+
+optimizer:
+  sample:
+    size: 200
+    seed: 13
+    # Optional: keep the sample balanced across a column's values.
+    # stratify_by: category
+
+  datasets:
+    - name: parquet
+      path: "s3://your-bucket/eval/questions.parquet"
+      # Maps your columns onto the prompt set's placeholders.
+      input_columns:
+        input: question
+      reference_column: answer
+
+  # Packaged inside foresightrlcore, so it needs no prompts_path. A prompt set
+  # whose YAML lives outside an installed package does — upload it to S3 and
+  # set `prompts_path`, or validation will tell you to.
+  prompt_set: single_v1
+
+  models:
+    # API candidates: no GPU, priced per 1K tokens for the cost column.
+    - name: claude-haiku
+      provider: bedrock
+      model_id: "anthropic.claude-3-haiku-20240307-v1:0"
+      region: us-west-2
+      price_in: 0.00025
+      price_out: 0.00125
+      max_tokens: 2048
+      temperature: 0.0
+
+    - name: claude-sonnet
+      provider: bedrock
+      model_id: "anthropic.claude-3-5-sonnet-20240620-v1:0"
+      region: us-west-2
+      price_in: 0.003
+      price_out: 0.015
+      max_tokens: 2048
+      temperature: 0.0
+
+    # A self-hosted candidate. Adding one flips instance sizing from CPU to GPU
+    # so the job can run `vllm serve` in-process.
+    #
+    # - name: qwen35-27b
+    #   provider: local
+    #   model_id: local-candidate
+    #   serving:
+    #     tensor_parallel_size: 4
+    #     max_model_len: 8192
+    #     served_model_name: local-candidate
+
+  modes: [single_call]
+
+  judges:
+    - name: correctness
+      weight: 2
+      client: default
+    - name: hallucination
+      weight: 1
+      client: default
+
+  judge_clients:
+    default:
+      provider: bedrock
+      bedrock:
+        model_id: "anthropic.claude-3-5-sonnet-20240620-v1:0"
+        region: us-west-2
+
+  # Candidates scoring at or below this on the primary metric are marked failing
+  # in the summary.
+  acceptance_threshold: 0.7
+
+  # Parallel in-flight rows. Raise for API candidates, lower if you are being
+  # throttled; the runner already retries with backoff.
+  concurrency: 8
+
+  checkpoint:
+    enabled: true
+    every_n_rows: 25
+
+execution:
+  type: aws_training_job
+
+output:
+  s3_path: "s3://your-bucket/output/optimizer-example/"
+
+container:
+  recipe: qwen3_5
+
+# Progress is checkpointed to JSONL, so a re-run resumes instead of repeating
+# completed rows. After changing the config, clear the checkpoint under
+# output.s3_path — otherwise the job finds every row complete and exits having
+# evaluated nothing, while still reporting success.

@@ -1,0 +1,137 @@
+# verl LoRA SFT — Meta Muse Glimmer 30B on 1x p4de.24xlarge (8x A100 80GB)
+#
+# Method: sft_verl — verl's FSDP SFT trainer (verl.trainer.sft_trainer), a
+# plain torchrun job (no Ray, no vLLM).
+#
+#   rl-train validate --config examples/configs/muse_glimmer_sft_verl.yaml
+#   rl-train train    --config examples/configs/muse_glimmer_sft_verl.yaml
+#
+# See muse_glimmer_sft_verl_smoke.yaml's header for the full writeup of
+# what makes this model different from the Gemma 4 recipe (a VLM checkpoint
+# verl already knows how to load whole via AutoModelForImageTextToText, a
+# transformers-version swap handled automatically by model.profile, and a
+# regex-string exclude_modules to keep LoRA off the vision tower).
+#
+# Model must be staged to S3 as the real checkpoint, unmodified (no
+# extraction step) — see CLAUDE.md "Pre-Staged Models". Replace every
+# `your-bucket` placeholder before launching; this is a large, expensive
+# job.
+
+job:
+  name: muse-glimmer-30b-sft-verl
+  max_runtime_hours: 48
+
+method:
+  type: sft_verl
+
+execution:
+  type: aws_training_job
+
+infra:
+  # torchrun-only path: the launcher auto-selects entry_point=train.py +
+  # SageMaker's SDK-native Torchrun(process_count_per_node=8) distribution
+  # when vllm_mode is "none" — no vLLM server, no topology field needed.
+  vllm_mode: none
+  instance_type: ml.p4de.24xlarge   # 8x A100 80GB, EFA
+  # ~60GB total checkpoint (dense 30B + a small vision tower) — confirm
+  # actual per-GPU FSDP shard memory on real hardware before scaling up;
+  # single node is expected to be sufficient.
+  instance_count: 1
+  # Uncomment and point at your own account's key if the destination
+  # bucket's default encryption key isn't one your training role can use
+  # (an explicit deny in an IAM permission boundary silently overrides any
+  # allow elsewhere — SageMaker checkpoint-sync uploads fail with
+  # kms:GenerateDataKey AccessDenied only after the cluster is already
+  # billed). Also covers checkpoint artifact uploads — SageMaker has no
+  # separate CheckpointConfig KMS field, they inherit this same key.
+  # kms_key_id: alias/your-kms-key-alias
+
+model:
+  # Must be the real meta-models/Muse-Glimmer-30B checkpoint staged to S3
+  # as-is (no extraction/processing step — see
+  # muse_glimmer_sft_verl_smoke.yaml's header for why). >=10B model —
+  # pre-stage to S3 (CLAUDE.md "Pre-Staged Models"); s3://.../ must end
+  # in "/".
+  name: "s3://your-bucket/models/muse-glimmer-30b/"
+  # Resolves target_modules/exclude_modules/trust_remote_code and the
+  # min_transformers_version swap from
+  # foresightrlcore/config/model_profiles.py's "muse_glimmer" entry,
+  # verified directly against the real checkpoint (meta-device
+  # construction + a real peft.LoraConfig build): text attention/MLP use
+  # standard q_proj/k_proj/v_proj/o_proj/gate_proj/up_proj/down_proj
+  # naming (matches the schema default target_modules directly, unlike
+  # Gemma 4/Qwen3.5); the vision tower's attention ALSO uses
+  # q_proj/k_proj/v_proj, so exclude_modules must be (and is, in the
+  # profile) a regex STRING, not a list, to exclude the whole subtree —
+  # confirmed 0 vision hits / 416 correctly-targeted text modules. Dense
+  # model, no target_parameters needed.
+  profile: muse_glimmer
+  lora:
+    r: 64
+    alpha: 128
+    dropout: 0.05
+
+training:
+  epochs: 2
+  learning_rate: 1.0e-4
+  gradient_checkpointing: true
+  logging_steps: 10
+  save_steps: 200
+  report_to: tensorboard
+
+  sft_verl:
+    data_format: messages
+    max_length: 4096   # matches the smoke test's real content length; widen if the real corpus differs
+    truncation: error   # fail loud on outliers rather than silently truncate the response
+    use_dynamic_bsz: true
+    max_token_len_per_gpu: 16384
+    ulysses_sequence_parallel_size: 1   # requires use_remove_padding=true — see below
+    # verl's native remove-padding path (cu_seqlens-based) — this
+    # profile leaves attn_implementation unset (defaults to
+    # flash_attention_2, the one real prerequisite; see
+    # _validate_sft_verl) and head_dim=128 is within FlashAttention-2's
+    # cap, so there's no known correctness hazard. Confirm the smoke
+    # config (muse_glimmer_sft_verl_smoke.yaml) has actually run
+    # successfully with this set to true before trusting it here too —
+    # this hasn't been exercised on real hardware yet.
+    use_remove_padding: true
+    use_liger: false   # liger-kernel's muse_glimmer support is not verified — see requirements file
+    train_batch_size: 256
+    save_freq: 200
+    resume_mode: auto
+    # Low, not verl's own default of 8: data.eval_path below means a
+    # val_dataloader gets built too, sharing this SAME worker count
+    # (verl's own data.num_workers field backs both train and val) — this
+    # exact combination (sizable model + eval_path set) reproduced an
+    # `OSError: [Errno 12] Cannot allocate memory` at os.fork() on a real
+    # Gemma 4 26B-A4B job (training itself completed and checkpointed
+    # fine; only the first val_dataloader construction crashed). Applying
+    # the same precaution here since Muse Glimmer 30B is comparably sized
+    # and this config also sets eval_path — not yet exercised on real
+    # hardware for Muse specifically.
+    dataloader_num_workers: 2
+
+data:
+  # train_path/eval_path must be DIFFERENT prefixes for data_format:
+  # messages/flat — unlike data_format: packed (see the Gemma 4 example),
+  # there's no training_*/validation_* filename disambiguation here, so
+  # pointing both at the same prefix would silently train and evaluate on
+  # the identical files (data leakage, not a crash). Point eval_path at a
+  # real held-out split, or drop the field entirely (see
+  # muse_glimmer_sft_verl_smoke.yaml, which runs with no eval split at all).
+  train_path: "s3://your-bucket/data/muse_glimmer_sft_data/train/"
+  eval_path: "s3://your-bucket/data/muse_glimmer_sft_data/eval/"
+
+output:
+  s3_path: "s3://your-bucket/output/muse-glimmer-30b-sft-verl"
+  checkpoint_s3_path: "s3://your-bucket/checkpoints/muse-glimmer-30b-sft-verl"
+
+container:
+  # verl_sft is model-agnostic — the transformers version bump this model
+  # needs happens at job runtime (model.profile: muse_glimmer triggers it),
+  # not via a separate per-model container recipe.
+  recipe: verl_sft
+
+# No `secrets:` / `task:` sections — verl SFT has no reward function / LLM
+# judge / task plugin; those config sections are Optional and unused by
+# method.type: sft_verl.

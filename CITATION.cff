@@ -1,0 +1,14 @@
+cff-version: 1.2.0
+message: If you use this software or find this repository useful for your research or work, please cite us using the metadata below.
+title: ForesightRLCore
+type: software
+license: Apache-2.0
+url: "https://github.com/intuit/foresight-rl-core"
+repository-code: "https://github.com/intuit/foresight-rl-core"
+authors:
+  - given-names: Ofir Ben
+    family-names: Shoham
+    affiliation: Intuit
+  - given-names: Yakov
+    family-names: Gazman
+    affiliation: Intuit
